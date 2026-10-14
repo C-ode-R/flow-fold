@@ -1,0 +1,20 @@
+[
+  {
+    "model": "baseline",
+    "median_target_rmsd_A": 3.942,
+    "target_closer": 16,
+    "under_2A": 4
+  },
+  {
+    "model": "signed input",
+    "median_target_rmsd_A": 4.125,
+    "target_closer": 18,
+    "under_2A": 1
+  },
+  {
+    "model": "signed input + loss",
+    "median_target_rmsd_A": 4.08,
+    "target_closer": 18,
+    "under_2A": 2
+  }
+]

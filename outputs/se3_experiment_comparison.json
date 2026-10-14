@@ -1,0 +1,47 @@
+[
+  {
+    "run": "run_se3",
+    "steps": 3000,
+    "median_ca_rmsd_A": 12.177066903842046,
+    "correct_handedness_count": 14,
+    "under_2A_count": 0,
+    "median_generated_CN_A": 12.246935367584229,
+    "target_CN_A": 1.3350489139556885
+  },
+  {
+    "run": "run_se3_aligned",
+    "steps": 3000,
+    "median_ca_rmsd_A": 12.217040619820068,
+    "correct_handedness_count": 14,
+    "under_2A_count": 0,
+    "median_generated_CN_A": 12.291042804718018,
+    "target_CN_A": 1.3350489139556885
+  },
+  {
+    "run": "run_se3_helix",
+    "steps": 3000,
+    "median_ca_rmsd_A": 2.541389374294482,
+    "correct_handedness_count": 32,
+    "under_2A_count": 2,
+    "median_generated_CN_A": 3.355164885520935,
+    "target_CN_A": 1.3350489139556885
+  },
+  {
+    "run": "run_se3_helix_atoms",
+    "steps": 5500,
+    "median_ca_rmsd_A": 2.0539919326651273,
+    "correct_handedness_count": 32,
+    "under_2A_count": 11,
+    "median_generated_CN_A": 2.811155080795288,
+    "target_CN_A": 1.3350489139556885
+  },
+  {
+    "run": "run_se3_helix_bonds",
+    "steps": 7500,
+    "median_ca_rmsd_A": 2.0036082626563143,
+    "correct_handedness_count": 32,
+    "under_2A_count": 16,
+    "median_generated_CN_A": 2.4597822427749634,
+    "target_CN_A": 1.3350489139556885
+  }
+]

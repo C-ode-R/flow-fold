@@ -1,0 +1,13 @@
+work/
+data/cif/
+*.pt
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Local structures, large run outputs, and machine-specific manifests.
+outputs/*.cif
+outputs/multi_data/
+outputs/manifest_*.json
+outputs/run_*/
