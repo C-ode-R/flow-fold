@@ -41,6 +41,20 @@ work/.venv/bin/python data/audit_manifest.py \
 - GPU 학습기는 전체 코퍼스를 RAM/GPU에 올리지 않는다. `Dataset`이 인덱스를 읽고 필요한 샤드만 열며, 샤드 단위 캐시와 prefetch를 사용한다. train/val/test 샤드를 별도로 두고 학습 프로세스는 test 인덱스를 받지 않는다.
 - 버킷은 실제 길이로 만들고, 배치당 `ΣL²`가 예산 이내가 되도록 묶는다. 긴 chain은 batch를 줄이고, 짧은 chain은 여러 개를 묶는다. crop을 쓰더라도 일정 비율의 전체 chain을 유지해 장거리 관계를 학습시킨다. crop은 chain break와 원자 mask를 함께 자른다.
 
+## 길이 커리큘럼
+
+첫 1만 개 학습은 작은 **완전한 단백질만** 쓰는 방식으로 제한하지 않는다. 길이가 긴 학습 단백질에서도 연속 구간을 잘라 local frame과 pair 관계를 배우되, 전체 단백질의 장거리 접촉을 놓치지 않도록 후반부터 full-chain 배치를 넣는다. AlphaFold 2는 256-residue crop 학습 뒤 384-residue crop으로 파인튜닝했다. 이 전략을 우리 모델에 그대로 적용하면 효과가 있다는 뜻은 아니므로 동일 계산량의 혼합 길이 대조군을 둔다.
+
+| 단계 | 주 길이 | 학습 샘플 구성 | 확인할 것 |
+| --- | --- | --- | --- |
+| S1 | 40–128 또는 ≤192 잔기 crop | 짧은 완전한 chain + 긴 train chain에서 뽑은 crop | 로컬 backbone·IPA 안정화, validation short/medium 성능 |
+| S2 | 128–256 | 긴 chain 비율을 늘리고 S1 길이를 약 20–30% 재생 | 중거리 구조와 접촉, short 성능 유지 |
+| S3 | 256–384, 일부 full-chain | 긴 chain과 전체 구조를 우선하되 짧은 샘플 약 20% 유지 | 전역 topology·TM/lDDT 개선, 길이별 퇴화 여부 |
+
+crop에는 원본 residue 번호를 보존하고 crop 경계와 실제 chain break를 구분한다. 여러 떨어진 segment를 한 샘플로 만들면 원래 접합되지 않은 구간을 가짜 연속 backbone으로 감독하지 않는다. 현재 `pair_frame.py`는 상대 위치를 `L-1`로 나누므로 동일한 10-residue 간격의 값이 길이에 따라 바뀐다. 커리큘럼 전에 **절대 서열 offset을 clipping/binning한 위치 특징**으로 바꾸고, crop에서도 원본 residue index를 사용한다.
+
+커리큘럼의 효과는 동일한 구조 데이터, PLM, 총 관측 residue 수 또는 `ΣL²` 예산, optimizer step, validation 선택 기준의 **처음부터 혼합 길이 학습**과 비교한다. 단순히 S3가 더 많은 계산을 사용해서 좋아진 경우를 구분해야 한다. 구조별 S1→S2→S3 validation trajectory를 저장하고, short/medium/long 전체에서 성능을 본다.
+
 ## GPU 학습기
 
 초기 프로파일 대상: H100 80GB 1장, BF16, 길이 128/256/384/512, pair width 64/128. 기록할 값은 `peak_allocated_GB`, `step_seconds`, `residues_per_second`, `L²_per_second`, 데이터 대기 시간, validation 시간이다. 이 측정 전에는 전체 학습 시간을 약속하지 않는다.
