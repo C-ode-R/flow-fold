@@ -59,3 +59,21 @@ cd ..
 `frame_compare.py` reports Cα RMSD, lDDT-Cα, Cα pair distance error, predicted distance error, chirality, mirror preference, and backbone geometry using one metric implementation for all three checkpoints. Earlier checkpoints and experiment records are preserved. A common evaluation protocol does not mean that early-stopped models receive identical optimizer steps; each best step is recorded in its checkpoint and training history.
 
 The first completed comparison is documented in [the Pair-Aware experiment notes](outputs/pair_frame_experiment_notes.md). Both Pair-Aware settings slightly increased test lDDT-Cα but **did not improve test Cα RMSD** relative to the Baseline. Consistency loss reduced disagreement between the distance head and predicted coordinates without solving the fold problem.
+
+## Explicit pair geometry and frame refinement
+
+`outputs/geometry_frame.py` extends the Pair-Aware checkpoint with symmetric distogram and contact heads and directional local-frame rotation/direction heads. Four shared refinement steps can update Cα positions and proper SO(3) rotations from learned pair features plus the current frame geometry. The refinement module is SE(3)-equivariant with respect to its input structure; the sequence-to-initial-structure predictor itself remains a canonical-frame predictor. `outputs/geometry_targets.py` excludes missing residues and broken backbone segments from pair supervision. Target-derived break masks are never fed to inference.
+
+Use the same A checkpoint to initialize B (geometry supervision), C (geometry supervision plus four refinement steps), and a continuation control. Each adds up to 4,000 optimizer steps with seed 42 and learning rate 1e-4. Select each checkpoint using validation only, then evaluate test once:
+
+```bash
+cd outputs
+../.venv/bin/python geometry_train.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --init-checkpoint run_pair_frame/best_checkpoint.pt --out run_geometry_b --steps 4000 --seed 42
+../.venv/bin/python geometry_train.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --init-checkpoint run_pair_frame/best_checkpoint.pt --out run_geometry_c --steps 4000 --seed 42 --refine-steps 4
+../.venv/bin/python geometry_train.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --init-checkpoint run_pair_frame/best_checkpoint.pt --out run_geometry_control --steps 4000 --seed 42 --distogram-weight 0 --contact-weight 0 --orientation-weight 0 --direction-weight 0
+../.venv/bin/python geometry_compare.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --runs run_pair_frame run_geometry_b run_geometry_c --control run_geometry_control --splits val test --out geometry_comparison.json
+```
+
+The comparison adds fixed-correspondence TM-score (an approximate rigid-transform optimization, not TM-align), long-range contact precision at L, and length/contact-density slices. Exact architecture and loss settings are stored in each local run's `history.json` and best checkpoint. The geometry heads add about 1,700 parameters; four refinement steps add about 13,700 more parameters and O(L²) pair-message computation.
+
+Two completed fine-tuning seeds and the per-chain results are documented in [the geometry experiment notes](outputs/geometry_experiment_notes.md). Explicit geometry supervision improves held-out distogram and contact-head metrics, but does **not** establish a reliable improvement in global folding accuracy: RMSD changes are small and seed dependent, while fixed-correspondence TM-score is lower than A in both runs. The second seed reuses A's checkpoint, so this is not a fully independent end-to-end seed study.
