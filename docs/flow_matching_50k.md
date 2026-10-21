@@ -34,25 +34,27 @@
 
 cd outputs
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k \
-  --epochs 10 --accumulate 8 --ode-steps 25 --device cuda
+  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda
 
 ../.venv/bin/python evaluate_flow_large.py \
   --cache ../work/flow50k/cache \
-  --checkpoint run_flow_50k/best.pt \
-  --out run_flow_50k/test.json --device cuda
+  --checkpoint run_flow_50k_batched/best.pt \
+  --out run_flow_50k_batched/test.json --device cuda
 ```
 
 `work/`와 checkpoints는 Git에서 제외된다. 후보 수집은 페이지 단위, 임베딩은 샤드 단위로 재시작할 수 있다. 학습은 **완료된 epoch 경계**에서만 재시작한다:
 
 ```bash
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k \
-  --epochs 10 --accumulate 8 --ode-steps 25 --device cuda \
-  --resume run_flow_50k/last.pt
+  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda \
+  --resume run_flow_50k_batched/last.pt
 ```
 
 실제 확보 가능한 데이터 수가 5만 미만이면 `finalize_flow_manifest.py`는 요청한 수를 조용히 줄이지 않고 실패한다. 확보 수와 필터 탈락 사유를 보고한 뒤 목표를 다시 결정해야 한다. 임베딩 모델을 바꾸면 별도 캐시·실험으로 취급한다. 첫 구현은 작은 ESM-2 8M을 고정하며, 큰 PLM 효과와 Flow Matching 효과를 혼동하지 않기 위함이다.
+
+H100 학습 경로는 샤드별로 다음 샤드를 CPU에서 미리 읽고, 샤드 안의 서열을 길이별로 묶어 최대 8개씩 padding한다. 모든 attention, 삼각 갱신, 속도·거리·FAPE 손실에서 padding을 제외한다. CPU batch는 pinned memory를 사용해 비동기 전송하고, PyTorch scaled-dot-product attention과 BF16 autocast를 사용한다. `--batch-size 8 --accumulate 4`는 시작 설정이며 H100 메모리와 처리량을 보고 조정할 수 있다. 기존 단일 단백질 checkpoint와 새 batched 모델의 가중치는 호환되지 않아 실행 디렉터리를 `run_flow_50k_batched`로 분리했다.
 
 ## 알고리즘
 
@@ -71,7 +73,7 @@ cd outputs
 - `work/afdb_short/candidates.json`: 후보, 품질 수치, 탈락 사유
 - `work/flow50k/manifest.json` 및 `audit.json`: 확정 분할과 중복 감사
 - `work/flow50k/cache/index.json` 및 `shard_*.pt`: 임베딩·frame 정답과 checksum
-- `outputs/run_flow_50k/history.jsonl`, `last.pt`, `best.pt`, `best_validation.json`, `test.json`
+- `outputs/run_flow_50k_batched/history.jsonl`, `last.pt`, `best.pt`, `best_validation.json`, `test.json`
 
 생성 손실이 내려가는 것만으로 성공으로 보지 않는다. 동일 데이터·평가 조건의 기존 Pair-Aware와 Cα RMSD, lDDT-Cα, TM 지표, 장거리 접촉을 비교한다. 현재 TM 지표는 고정 잔기 대응 근사치이므로 최종 평가에는 정식 TM-align 구현을 별도로 고정해야 한다. 새 untouched experimental test에서 모델을 선택하지 않는다.
 

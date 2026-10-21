@@ -39,12 +39,12 @@ python3 -m venv --system-site-packages .venv
 
 cd outputs
 resume=()
-if [ -f run_flow_50k/last.pt ]; then
-  resume=(--resume run_flow_50k/last.pt)
+if [ -f run_flow_50k_batched/last.pt ]; then
+  resume=(--resume run_flow_50k_batched/last.pt)
 fi
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k \
-  --epochs 10 --accumulate 8 --ode-steps 25 --device cuda "${resume[@]}"
+  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda "${resume[@]}"
 ../.venv/bin/python evaluate_flow_large.py \
-  --cache ../work/flow50k/cache --checkpoint run_flow_50k/best.pt \
-  --out run_flow_50k/test.json --device cuda
+  --cache ../work/flow50k/cache --checkpoint run_flow_50k_batched/best.pt \
+  --out run_flow_50k_batched/test.json --device cuda

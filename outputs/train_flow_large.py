@@ -14,7 +14,8 @@ import torch
 from torch.nn import functional as F
 
 from flow_fold import kabsch_rmsd, random_rotations
-from flow_model_large import SequenceFrameFlow
+from flow_batching import train_batches
+from flow_model_large import SequenceFrameFlow, frame_geometry
 from geometry_frame import DISTANCE_EDGES_A
 from geometry_metrics import fixed_correspondence_tm_score
 from se3_flow import so3_exp, so3_log
@@ -77,6 +78,51 @@ def flow_loss(model, record, distance_weight=0.05, fape_weight=0.2):
                                       estimated_rotation)
     target_relative = torch.einsum("ijd,idk->ijk", ca1[None] - ca1[:, None], rotation1)
     fape = ((predicted_relative - target_relative).norm(dim=-1)[pair_mask]).clamp(max=1).mean() if pair_mask.any() else position * 0
+    total = position + angular + distance_weight * distogram + fape_weight * fape
+    return total, dict(velocity=float(position.detach()), angular=float(angular.detach()),
+                       distogram=float(distogram.detach()), fape=float(fape.detach()))
+
+
+def batch_flow_loss(model, batch, distance_weight=0.05, fape_weight=0.2):
+    ca1, rotation1, mask = batch["ca"], batch["rot"], batch["mask"]
+    count, length = mask.shape
+    valid = mask[..., None]
+    ca0 = torch.randn_like(ca1) * valid
+    ca0 = (ca0 - ca0.sum(1, keepdim=True) /
+           mask.sum(1)[:, None, None].clamp_min(1)) * valid
+    rotation0 = random_rotations(count * length, ca1.device).reshape(count, length, 3, 3)
+    covariance = ca1.transpose(1, 2) @ ca0
+    u, _, vh = torch.linalg.svd(covariance)
+    correction = torch.eye(3, device=ca1.device).expand(count, -1, -1).clone()
+    correction[:, -1, -1] = torch.sign(torch.linalg.det(u @ vh))
+    row_rotation = u @ correction @ vh
+    ca1 = ca1 @ row_rotation
+    rotation1 = row_rotation.transpose(-1, -2)[:, None] @ rotation1
+    omega = so3_log(rotation0.transpose(-1, -2) @ rotation1)
+    time = 0.02 + 0.96 * torch.rand(count, device=ca1.device)
+    weight = time[:, None, None]
+    ca_t = ((1 - weight) * ca0 + weight * ca1) * valid
+    rotation_t = rotation0 @ so3_exp(weight * omega)
+    target_v = torch.einsum("blj,blji->bli", ca1 - ca0, rotation_t)
+    with torch.autocast(device_type=ca1.device.type, dtype=torch.bfloat16,
+                        enabled=ca1.device.type == "cuda"):
+        predicted_v, predicted_w, dist_logits = model(
+            batch["embed"], batch["aa"], ca_t, rotation_t, time, mask)
+    predicted_v, predicted_w = predicted_v.float(), predicted_w.float()
+    position = ((predicted_v - target_v).square() * valid).sum() / (mask.sum() * 3)
+    angular = ((predicted_w - omega).square() * valid).sum() / (mask.sum() * 3)
+    distance_a = torch.cdist(ca1, ca1) * 10
+    bins = torch.bucketize(distance_a, distance_a.new_tensor(DISTANCE_EDGES_A))
+    upper = torch.ones(length, length, dtype=torch.bool, device=ca1.device).triu(1)
+    pair_mask = (upper[None] & mask[:, :, None] & mask[:, None, :] &
+                 (batch["segments"][:, :, None] == batch["segments"][:, None, :]))
+    distogram = F.cross_entropy(dist_logits[pair_mask].float(), bins[pair_mask])
+    estimated_ca = ca_t + (1 - weight) * torch.einsum(
+        "bli,blji->blj", predicted_v, rotation_t)
+    estimated_rotation = rotation_t @ so3_exp((1 - weight) * predicted_w)
+    predicted_relative = frame_geometry(estimated_ca, estimated_rotation)[..., :3]
+    target_relative = frame_geometry(ca1, rotation1)[..., :3]
+    fape = ((predicted_relative - target_relative).norm(dim=-1)[pair_mask]).clamp(max=1).mean()
     total = position + angular + distance_weight * distogram + fape_weight * fape
     return total, dict(velocity=float(position.detach()), angular=float(angular.detach()),
                        distogram=float(distogram.detach()), fape=float(fape.detach()))
@@ -149,6 +195,7 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--accumulate", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ode-steps", type=int, default=25)
@@ -156,8 +203,8 @@ def main():
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
-    if min(args.epochs, args.accumulate, args.ode_steps) < 1:
-        parser.error("epochs, accumulate, and ode-steps must be positive")
+    if min(args.epochs, args.accumulate, args.ode_steps, args.batch_size) < 1:
+        parser.error("epochs, accumulate, batch-size, and ode-steps must be positive")
     index_path = args.cache / "index.json"
     index = json.loads(index_path.read_text())
     if index["count"] != sum(shard["count"] for shard in index["shards"]):
@@ -189,35 +236,36 @@ def main():
         start_epoch, best_score = saved["epoch"], saved["best_score"]
     for epoch in range(start_epoch, args.epochs):
         model.train()
-        shard_order = [shard for shard in index["shards"] if shard["splits"].get("train")]
-        random.shuffle(shard_order)
         optimizer.zero_grad(set_to_none=True)
         pending, seen, sum_loss = 0, 0, 0.0
-        for shard in shard_order:
-            records = torch.load(args.cache / shard["file"], map_location="cpu", weights_only=True)
-            train_records = [record for record in records if record["split"] == "train"]
-            random.shuffle(train_records)
-            for record in train_records:
-                record = on_device(record, device)
-                loss, parts = flow_loss(model, record)
-                (loss / args.accumulate).backward()
-                pending += 1
-                seen += 1
-                sum_loss += float(loss.detach())
-                if pending == args.accumulate:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    pending = 0
-            del records, train_records
+        for batch in train_batches(args.cache, index, args.batch_size, args.seed,
+                                   epoch, pin_memory=device.type == "cuda"):
+            batch = {key: value.to(device, non_blocking=True).float()
+                     if key in ("embed", "ca", "rot") else
+                     value.to(device, non_blocking=True)
+                     for key, value in batch.items()}
+            loss, parts = batch_flow_loss(model, batch)
+            (loss / args.accumulate).backward()
+            pending += 1
+            seen += len(batch["aa"])
+            sum_loss += float(loss.detach()) * len(batch["aa"])
+            if pending == args.accumulate:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                pending = 0
         if pending:
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.mul_(args.accumulate / pending)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         summary, rows = evaluate(model, args.cache, index, device, args.ode_steps,
                                  args.seed, args.val_limit)
         score = summary["ca_rmsd_A"] / 10 + 1 - summary["lddt_ca"]
-        report = dict(epoch=epoch + 1, train_samples=seen, train_loss=sum_loss / seen,
+        report = dict(epoch=epoch + 1, train_samples=seen, batch_size=args.batch_size,
+                      train_loss=sum_loss / seen,
                       val_score=score, val_summary=summary, last_train_parts=parts)
         with (args.out / "history.jsonl").open("a") as stream:
             stream.write(json.dumps(report) + "\n")
@@ -227,6 +275,7 @@ def main():
         checkpoint = dict(model=model.state_dict(), optimizer=optimizer.state_dict(),
                           config=model.config, epoch=epoch + 1, best_score=best_score,
                           seed=args.seed, ode_steps=args.ode_steps,
+                          batch_size=args.batch_size, accumulate=args.accumulate,
                           index_sha256=sha256(index_path), manifest_sha256=index["manifest_sha256"],
                           python_rng=random.getstate(), torch_rng=torch.get_rng_state(),
                           cuda_rng=torch.cuda.get_rng_state_all() if device.type == "cuda" else None)
