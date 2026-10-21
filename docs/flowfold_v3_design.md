@@ -12,6 +12,8 @@ The current geometry-supervised Pair-Aware model learns useful distogram/contact
 
 - AlphaFold 2: triangular pair updates, pair-biased single attention, invariant point attention (IPA), frame-aligned point error (FAPE), and recycling. Source: https://www.nature.com/articles/s41586-021-03819-2
 - FoldFlow-2: frozen ESM sequence features, a joint single/pair trunk, IPA structure processing, and SE(3) flow matching. Source: https://arxiv.org/html/2405.20313
+- RFdiffusion and AlphaFold 3: diffusion-based backbone design and structure prediction, respectively. Sources: https://www.nature.com/articles/s41586-023-06415-8 and https://www.nature.com/articles/s41586-024-07487-w
+- Stochastic interpolants: a framework connecting flow and diffusion processes. Source: https://www.jmlr.org/papers/v26/23-1605.html
 
 This is a sequence-only folding model. It does not assume an MSA or template at inference. We should reimplement architectural ideas in our own code and review the source repositories' licenses before copying any implementation.
 
@@ -85,6 +87,23 @@ FoldFlow's optimal-transport matching should not be copied blindly: pairing a se
 | E | D + IPA frame updates | Does pair information improve coordinates? |
 | F | E + frame/pair recycling and FAPE | Do repeated 3D updates improve global topology? |
 | G | F + sequence-conditioned SE(3) flow | Does flow add accuracy or useful diversity? |
+
+### Generative objective decision: flow, diffusion, or hybrid
+
+The initial generative branch is **conditional SE(3) flow matching**, because it reuses the frame representation and equivariant trunk, has a simple geodesic path and tangent target, and supports a direct deterministic sampler. This is an engineering choice, not an assertion that flow is intrinsically more accurate than diffusion. Both objectives may represent the same conditional structural distribution given sufficient capacity and training.
+
+Hold the PLM, pair trunk, IPA blocks, data split, length curriculum, optimizer budget, and frame representation fixed. Compare:
+
+| Branch | Training target | Inference | Question |
+| --- | --- | --- | --- |
+| F | Deterministic recycled frames | One pass / recycling | Does the structural trunk already fold? |
+| G-flow | SE(3) tangent velocity along a sequence–native path | ODE integration | Does generative transport improve accuracy or diversity? |
+| G-diffusion | Translation and SO(3) denoising/score at matched noise levels | Reverse denoising | Does stochastic denoising improve difficult or ambiguous folds? |
+| G-hybrid | Only if G-flow/G-diffusion show complementary errors: flow for global frames, small-noise score corrector for local geometry | ODE + short denoising tail | Is the extra model and inference cost justified? |
+
+“Hybrid” must be operationally defined. FoldFlow-SFM is already a stochastic flow-matching method, while a flow sampler followed by a diffusion corrector is a distinct two-stage system. Do not conflate them. A stochastic-interpolant formulation could share a trunk with separate velocity and score heads, but adds supervision and sampler complexity; defer it until a controlled single-objective result exists.
+
+Use the same number of network evaluations (e.g. 10/25/50), the same number of sampled structures, and the same internal confidence-based ranking for all branches. Report best-of-one and fixed-budget ranked-best folding metrics. An oracle best-of-k using native test structure is diagnostic only and cannot be the deployed result. If G-flow fails to beat F on lDDT/TM/contact recovery, improve conditioning and data before training a hybrid. If diffusion wins only at much higher compute, report that tradeoff explicitly.
 
 Keep split, PLM cache, length policy, data budget, validation selection, and evaluation implementation fixed within each ablation. Use at least three end-to-end seeds for the finalists, including independently trained trunks. Save every configuration and selected validation checkpoint. Test only after the architecture and hyperparameters are frozen.
 
