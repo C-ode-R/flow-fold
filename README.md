@@ -40,3 +40,22 @@ cd outputs
 ```
 
 Training was performed on CPU for these small research models. The reported values are specific to this split and the recorded settings. This repository is under active development.
+
+## Pair-Aware Direct Frame experiment
+
+`outputs/pair_frame.py` adds a learned residue-pair representation (64 channels by default). Each of four blocks uses it as an attention bias and updates it from the single representation. The coordinate, rotation, and distance outputs retain the DirectFrame interface; predicted distances are explicitly symmetric. The optional consistency loss compares the distance head with distances computed from predicted Cα coordinates.
+
+`outputs/pair_train.py` loads only the train and validation splits. It evaluates validation every 500 steps, saves `best_checkpoint.pt` under the run directory, and stops after eight validation checks without an improvement. Selection minimizes `median Cα RMSD (Å) / 10 + 1 − median lDDT-Cα`. The test split is opened only by the separate comparison command after model selection. Use the same seed, data, and evaluation command for both Pair-Aware runs:
+
+```bash
+cd outputs
+../.venv/bin/python pair_train.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --out run_pair_frame --steps 12000 --seed 42
+../.venv/bin/python pair_train.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --out run_pair_frame_consistency --steps 12000 --seed 42 --consistency-weight 0.25
+../.venv/bin/python frame_compare.py --manifest ../data/manifest_1000train_200holdout.json --esm-cache ../data/esm8m_1200.pt --runs run_direct_frame run_pair_frame run_pair_frame_consistency --splits val test --out pair_frame_comparison.json
+cd ..
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+`frame_compare.py` reports Cα RMSD, lDDT-Cα, Cα pair distance error, predicted distance error, chirality, mirror preference, and backbone geometry using one metric implementation for all three checkpoints. Earlier checkpoints and experiment records are preserved. A common evaluation protocol does not mean that early-stopped models receive identical optimizer steps; each best step is recorded in its checkpoint and training history.
+
+The first completed comparison is documented in [the Pair-Aware experiment notes](outputs/pair_frame_experiment_notes.md). Both Pair-Aware settings slightly increased test lDDT-Cα but **did not improve test Cα RMSD** relative to the Baseline. Consistency loss reduced disagreement between the distance head and predicted coordinates without solving the fold problem.
