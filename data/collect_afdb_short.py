@@ -92,7 +92,7 @@ def one_candidate(candidate, out_dir, args):
         quality = validate_structure(destination, sequence, args.mean_plddt,
                                      args.min_plddt, args.max_plddt_std)
         row = dict(id=accession, chain="A", sequence=sequence, residues=len(sequence),
-                   source="AlphaFoldDB", split="candidate", path=str(destination.resolve()),
+                   source="AlphaFoldDB", split="candidate", path=str(destination.relative_to(out_dir)),
                    quality=quality, model_version=model_version,
                    checksum=hashlib.sha256(destination.read_bytes()).hexdigest())
         return row, None
@@ -117,6 +117,7 @@ def main():
     manifest_path = args.out / "candidates.json"
     state = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
         "source": "UniProtKB sequences + AlphaFold DB PDB coordinates",
+        "path_base": "manifest",
         "query": "length:[40 TO 128]", "proteins": [], "processed_count": 0,
         "next_url": None, "exhausted": False, "rejections": {}
     }

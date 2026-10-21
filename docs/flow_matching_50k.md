@@ -12,6 +12,25 @@
 
 아래 명령은 저장소 루트 기준이다. `outputs/requirements.txt` 설치와 `mmseqs` 실행 파일이 필요하다. GPU에서 ESM 임베딩과 학습을 실행할 때는 CUDA PyTorch 설치가 필요하다.
 
+### GPU 대여 전에 CPU에서 준비하기
+
+별도 CPU 머신의 저장소 루트에서 아래를 실행한다. 스크립트는 7만 후보 수집, 5만 학습 구조 확정, 실험 구조 다운로드, 파일 감사를 수행한다. 7만 후보가 확보되지 않으면 실패하며, 이때 5만 학습 구조가 준비되었다고 간주하면 안 된다.
+
+```bash
+bash scripts/prepare_flow50k_cpu.sh
+.venv/bin/python data/flow50k_filelist.py \
+  --manifest work/flow50k/manifest.json \
+  --out work/flow50k/upload_files.txt
+```
+
+H100 서버에서 저장소를 클론한 다음, CPU 머신에서 최종 manifest가 참조하는 **선택된 5만 구조와 validation/test 구조만** 전송한다. 아래 `USER@HOST`는 실제 SSH 주소로 바꾼다.
+
+```bash
+rsync -a --partial --files-from=work/flow50k/upload_files.txt ./ USER@HOST:~/flow-fold/
+```
+
+전송 후 H100의 저장소에서 `bash scripts/run_h100_flow50k.sh`를 실행하면 이미 전송된 manifest를 찾아 수집·클러스터링을 건너뛰고, 감사 후 ESM 임베딩과 학습을 진행한다. 터미널을 닫을 계획이라면 앞서 안내한 `nohup` 명령을 사용한다. CPU와 H100 양쪽에서 저장소의 `work/` 및 `data/cif/` 상대 위치를 유지해야 한다. 최종 manifest는 자체 위치를 기준으로 파일 경로를 저장하므로 저장소 전체를 다른 머신에 옮겨도 유효하다.
+
 ```bash
 .venv/bin/python data/collect_afdb_short.py --out work/afdb_short \
   --target 70000 --max-candidates 500000 --workers 8

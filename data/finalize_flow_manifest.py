@@ -5,6 +5,7 @@ make a new untouched experimental test set for final scientific claims.
 """
 import argparse
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -67,12 +68,27 @@ def main():
     if len(train) < args.target:
         raise ValueError(f"only {len(train)} candidates remain after holdout cluster exclusion; "
                          f"need {args.target}. Collect more or lower the stated target")
+    # Rebase every path to the final manifest, so moving the complete work/
+    # and data/cif/ trees to another machine leaves the manifest valid.
+    candidate_base = args.candidates.resolve().parent
+    holdout_base = Path(__file__).resolve().parent.parent / "outputs"
+    output_base = args.out.resolve().parent
+    for row in train:
+        source = Path(row["path"])
+        source = source if source.is_absolute() else candidate_base / source
+        row["path"] = os.path.relpath(source.resolve(), output_base)
+    portable_holdouts = []
+    for row in holdouts:
+        source = Path(row["path"])
+        source = source if source.is_absolute() else holdout_base / source
+        portable_holdouts.append(dict(row, path=os.path.relpath(source.resolve(), output_base)))
     result = dict(source="AFDB high-confidence train; experimental PDB val/test",
+                  path_base="manifest",
                   seed=args.seed, target=args.target,
                   cluster_method="mmseqs easy-cluster --min-seq-id 0.3 -c 0.8 --cov-mode 0",
                   counts=dict(train=len(train), val=sum(r["split"] == "val" for r in holdouts),
                               test=sum(r["split"] == "test" for r in holdouts)),
-                  proteins=train + holdouts)
+                  proteins=train + portable_holdouts)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.out.with_suffix(args.out.suffix + ".tmp")
     temporary.write_text(json.dumps(result, indent=2))

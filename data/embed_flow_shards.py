@@ -17,10 +17,11 @@ def fingerprint(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def parse_structure(row):
+def parse_structure(row, manifest_dir=None):
     path = Path(row["path"])
     if not path.is_absolute():
-        path = (Path(__file__).resolve().parent.parent / "outputs" / path).resolve()
+        base = manifest_dir if manifest_dir is not None else Path(__file__).resolve().parent.parent / "outputs"
+        path = (base / path).resolve()
     parser = PDBParser(QUIET=True) if path.suffix.lower() == ".pdb" else MMCIFParser(QUIET=True)
     chain = parser.get_structure("protein", str(path))[0][row["chain"]]
     residues = [residue for residue in chain if residue.id[0] == " " and
@@ -94,7 +95,7 @@ def main():
                 record = dict(id=row["id"], chain=row["chain"], split=row["split"],
                               sequence=row["sequence"], source=row.get("source", "PDB"),
                               embed=encoded[1:length + 1].cpu().half(),
-                              **parse_structure(row))
+                              **parse_structure(row, args.manifest.resolve().parent))
                 records.append(record)
         name = f"shard_{start // args.shard_size:05d}.pt"
         temporary = args.out / (name + ".tmp")

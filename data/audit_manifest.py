@@ -52,7 +52,9 @@ def audit(manifest_path, check_files=False):
         if row.get("cluster") is not None:
             cluster_splits[str(row["cluster"])].add(split)
         if check_files:
-            structure = (Path(__file__).resolve().parent.parent / "outputs" / row["path"]).resolve()
+            base = manifest_path.resolve().parent if payload.get("path_base") == "manifest" else (
+                Path(__file__).resolve().parent.parent / "outputs")
+            structure = (base / row["path"]).resolve()
             if not structure.is_file():
                 missing_paths.append(str(structure))
     sequence_leaks = [dict(sequence=sequence, splits=sorted(splits))
