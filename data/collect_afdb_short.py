@@ -9,6 +9,8 @@ import argparse
 import hashlib
 import json
 import math
+import random
+import re
 import statistics
 import time
 import urllib.error
@@ -26,7 +28,12 @@ AFDB = "https://alphafold.ebi.ac.uk/api/prediction/"
 ALPHABET = set("ACDEFGHIKLMNPQRSTVWY")
 
 
-def fetch(url, attempts=4):
+def next_page_url(link_header):
+    match = re.search(r'<([^>]*)>\s*;\s*rel="?next"?', link_header or "")
+    return match.group(1) if match else None
+
+
+def fetch(url, attempts=8):
     for attempt in range(attempts):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "flow-fold-research/0.1"})
@@ -37,7 +44,12 @@ def fetch(url, attempts=4):
                 raise
             if attempt == attempts - 1:
                 raise
-            time.sleep(min(30, 2 ** attempt))
+            retry_after = error.headers.get("Retry-After") if isinstance(error, urllib.error.HTTPError) else None
+            try:
+                delay = float(retry_after) if retry_after is not None else 2 ** attempt
+            except ValueError:
+                delay = 2 ** attempt
+            time.sleep(min(120, delay) + random.random())
 
 
 def validate_structure(path, expected_sequence, mean_floor, minimum_floor, std_ceiling):
@@ -78,8 +90,17 @@ def one_candidate(candidate, out_dir, args):
             entries = json.loads(metadata)
             if not entries:
                 return None, "no AFDB entry"
-            url = entries[0].get("pdbUrl")
-            model_version = entries[0].get("latestVersion") or entries[0].get("modelVersion")
+            entry = entries[0]
+            model_version = entry.get("latestVersion") or entry.get("modelVersion")
+            if entry.get("sequence") != sequence:
+                return None, "AFDB/UniProt sequence mismatch"
+            if entry.get("globalMetricValue") is not None and float(entry["globalMetricValue"]) < args.mean_plddt:
+                return None, "metadata low mean pLDDT"
+            if args.min_plddt >= 70 and (
+                    float(entry.get("fractionPlddtLow", 0)) > 0 or
+                    float(entry.get("fractionPlddtVeryLow", 0)) > 0):
+                return None, "metadata low minimum pLDDT"
+            url = entry.get("pdbUrl")
             if not url or urllib.parse.urlparse(url).hostname not in {
                 "alphafold.ebi.ac.uk", "www.alphafold.ebi.ac.uk", "alphafold.com"
             }:
@@ -107,12 +128,15 @@ def main():
     parser.add_argument("--target", type=int, default=50000)
     parser.add_argument("--max-candidates", type=int, default=500000)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--pilot", action="store_true",
+                        help="stop after max-candidates and report yield without requiring target")
     parser.add_argument("--mean-plddt", type=float, default=85)
     parser.add_argument("--min-plddt", type=float, default=70)
     parser.add_argument("--max-plddt-std", type=float, default=15)
     args = parser.parse_args()
-    if args.target < 1 or args.workers < 1 or args.max_candidates < args.target:
-        parser.error("target/workers must be positive and max-candidates >= target")
+    if args.target < 1 or args.workers < 1 or args.max_candidates < 1 or (
+            not args.pilot and args.max_candidates < args.target):
+        parser.error("target/workers/max-candidates must be positive; max-candidates >= target unless --pilot")
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "candidates.json"
     state = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
@@ -147,9 +171,7 @@ def main():
                 if seen >= args.max_candidates:
                     break
             state["processed_count"] = seen
-            links = headers.get("Link", "")
-            url = next((item[item.index("<") + 1:item.index(">")] for item in links.split(",")
-                        if 'rel="next"' in item and "<" in item and ">" in item), None)
+            url = next_page_url(headers.get("Link", ""))
             state["next_url"] = url
             state["exhausted"] = url is None
             temporary = manifest_path.with_suffix(".json.tmp")
@@ -158,8 +180,9 @@ def main():
             print(json.dumps({"processed": seen, "accepted": len(accepted),
                               "target": args.target}), flush=True)
     print(json.dumps({"accepted": len(accepted), "target": args.target,
+                      "processed": seen, "observed_yield": len(accepted) / max(seen, 1),
                       "manifest": str(manifest_path)}))
-    if len(accepted) < args.target:
+    if len(accepted) < args.target and not args.pilot:
         raise SystemExit("Target not reached; inspect rejections and expand candidate source")
 
 

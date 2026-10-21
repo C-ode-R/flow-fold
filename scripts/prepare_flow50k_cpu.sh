@@ -18,7 +18,24 @@ command -v mmseqs >/dev/null 2>&1 || { echo 'Install mmseqs2 before running' >&2
 python3 -m venv --system-site-packages .venv
 .venv/bin/python -m pip install 'biopython>=1.84'
 .venv/bin/python data/collect_afdb_short.py --out work/afdb_short \
-  --target 70000 --max-candidates 500000 --workers 8
+  --target 70000 --max-candidates 1000 --workers 4 --pilot
+.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+state = json.loads(Path("work/afdb_short/candidates.json").read_text())
+accepted = len(state["proteins"])
+processed = state["processed_count"]
+required = 70000 / 500000
+yield_rate = accepted / max(processed, 1)
+print(f"Pilot yield: {accepted}/{processed} = {yield_rate:.2%}; required >= {required:.2%}")
+if accepted < 70000 and processed >= 1000 and yield_rate < required:
+    raise SystemExit(
+        "Current quality filters are unlikely to reach 70k within 500k requests. "
+        "Stop and revise the data source/filters before bulk collection."
+    )
+PY
+.venv/bin/python data/collect_afdb_short.py --out work/afdb_short \
+  --target 70000 --max-candidates 500000 --workers 4
 .venv/bin/python data/finalize_flow_manifest.py \
   --candidates work/afdb_short/candidates.json \
   --holdout-manifest data/manifest_1000train_200holdout.json \
