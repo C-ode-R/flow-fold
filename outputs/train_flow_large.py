@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
+from backbone_atoms import peptide_geometry_loss, reconstruct_backbone
 from flow_fold import kabsch_rmsd, random_rotations
 from flow_batching import train_batches
 from flow_model_large import SequenceFrameFlow, frame_geometry
@@ -83,7 +84,8 @@ def flow_loss(model, record, distance_weight=0.05, fape_weight=0.2):
                        distogram=float(distogram.detach()), fape=float(fape.detach()))
 
 
-def batch_flow_loss(model, batch, distance_weight=0.05, fape_weight=0.2):
+def batch_flow_loss(model, batch, distance_weight=0.05, fape_weight=0.2,
+                    atom_weight=0.1, bond_weight=0.05, angle_weight=0.05):
     ca1, rotation1, mask = batch["ca"], batch["rot"], batch["mask"]
     count, length = mask.shape
     valid = mask[..., None]
@@ -123,9 +125,26 @@ def batch_flow_loss(model, batch, distance_weight=0.05, fape_weight=0.2):
     predicted_relative = frame_geometry(estimated_ca, estimated_rotation)[..., :3]
     target_relative = frame_geometry(ca1, rotation1)[..., :3]
     fape = ((predicted_relative - target_relative).norm(dim=-1)[pair_mask]).clamp(max=1).mean()
-    total = position + angular + distance_weight * distogram + fape_weight * fape
+    target_atoms = torch.einsum("blad,bdk->blak", batch["atoms"], row_rotation)
+    predicted_atoms = reconstruct_backbone(estimated_ca, estimated_rotation)
+    atom_mask = batch["atom_mask"] & mask[..., None]
+    atom_mask = atom_mask.clone()
+    atom_mask[:, :, 1] = False  # C-alpha is already supervised by velocity/FAPE.
+    oxygen_contiguous = torch.zeros_like(mask)
+    oxygen_contiguous[:, :-1] = (mask[:, :-1] & mask[:, 1:] &
+                                (batch["segments"][:, :-1] == batch["segments"][:, 1:]))
+    atom_mask[:, :, 3] &= oxygen_contiguous
+    atom_error = ((predicted_atoms - target_atoms).norm(dim=-1) * 10).clamp(max=10)
+    atom_loss = atom_error[atom_mask].mean()
+    bond, angle = peptide_geometry_loss(predicted_atoms, target_atoms,
+                                        batch["segments"], mask)
+    bond = bond * 10  # Å
+    total = (position + angular + distance_weight * distogram + fape_weight * fape +
+             atom_weight * atom_loss + bond_weight * bond + angle_weight * angle)
     return total, dict(velocity=float(position.detach()), angular=float(angular.detach()),
-                       distogram=float(distogram.detach()), fape=float(fape.detach()))
+                       distogram=float(distogram.detach()), fape=float(fape.detach()),
+                       atom_mae_A=float(atom_loss.detach()), peptide_bond_mae_A=float(bond.detach()),
+                       peptide_angle_cosine_error=float(angle.detach()))
 
 
 @torch.no_grad()
@@ -165,6 +184,35 @@ def score_one(predicted, target):
                 contact_precision_L=contact)
 
 
+def score_backbone(predicted_ca, predicted_rotation, record):
+    """Align on C-alpha with a proper rotation, then score observed backbone atoms."""
+    target_ca = record["ca"]
+    centered_predicted = predicted_ca - predicted_ca.mean(0)
+    centered_target = target_ca - target_ca.mean(0)
+    u, _, vh = torch.linalg.svd(centered_predicted.T @ centered_target)
+    correction = torch.eye(3, device=predicted_ca.device, dtype=predicted_ca.dtype)
+    correction[-1, -1] = torch.sign(torch.linalg.det(u @ vh))
+    row_rotation = u @ correction @ vh
+    predicted_atoms = reconstruct_backbone(predicted_ca, predicted_rotation)
+    predicted_atoms = ((predicted_atoms - predicted_ca.mean(0)) @ row_rotation +
+                       target_ca.mean(0))
+    target_atoms = record["atoms"]
+    atom_mask = record["atom_mask"].clone()
+    atom_mask[:, 1] = False
+    contiguous = record["segments"][:-1] == record["segments"][1:]
+    atom_mask[-1, 3] = False
+    atom_mask[:-1, 3] &= contiguous
+    atom_mae = (predicted_atoms - target_atoms).norm(dim=-1)[atom_mask].mean() * 10
+    predicted_raw = reconstruct_backbone(predicted_ca, predicted_rotation)[None]
+    target_raw = target_atoms[None]
+    bond, angle = peptide_geometry_loss(
+        predicted_raw, target_raw, record["segments"][None],
+        torch.ones(len(target_ca), dtype=torch.bool, device=target_ca.device)[None])
+    return dict(backbone_atom_mae_A=float(atom_mae),
+                peptide_bond_mae_A=float(bond * 10),
+                peptide_angle_cosine_error=float(angle))
+
+
 def evaluate(model, cache_dir, index, device, ode_steps, seed, limit=None, split="val"):
     model.eval()
     rows = []
@@ -175,8 +223,9 @@ def evaluate(model, cache_dir, index, device, ode_steps, seed, limit=None, split
             if record["split"] != split:
                 continue
             record = on_device(record, device)
-            generated, _ = generate(model, record, ode_steps, seed + len(rows))
-            rows.append(dict(id=record["id"], **score_one(generated, record["ca"])))
+            generated, rotation = generate(model, record, ode_steps, seed + len(rows))
+            rows.append(dict(id=record["id"], **score_one(generated, record["ca"]),
+                             **score_backbone(generated, rotation, record)))
             if limit and len(rows) >= limit:
                 break
         if limit and len(rows) >= limit:
@@ -184,7 +233,7 @@ def evaluate(model, cache_dir, index, device, ode_steps, seed, limit=None, split
     if not rows:
         raise ValueError(f"No {split} records in cache")
     summary = {key: float(np.median([row[key] for row in rows]))
-               for key in ("ca_rmsd_A", "lddt_ca", "tm_score_fixed", "contact_precision_L")}
+               for key in rows[0] if key != "id"}
     summary["n"] = len(rows)
     return summary, rows
 
@@ -197,6 +246,9 @@ def main():
     parser.add_argument("--accumulate", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--atom-weight", type=float, default=0.1)
+    parser.add_argument("--bond-weight", type=float, default=0.05)
+    parser.add_argument("--angle-weight", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ode-steps", type=int, default=25)
     parser.add_argument("--val-limit", type=int, help="Development only; omit for final selection")
@@ -205,10 +257,14 @@ def main():
     args = parser.parse_args()
     if min(args.epochs, args.accumulate, args.ode_steps, args.batch_size) < 1:
         parser.error("epochs, accumulate, batch-size, and ode-steps must be positive")
+    if min(args.atom_weight, args.bond_weight, args.angle_weight) < 0:
+        parser.error("backbone loss weights must be nonnegative")
     index_path = args.cache / "index.json"
     index = json.loads(index_path.read_text())
     if index["count"] != sum(shard["count"] for shard in index["shards"]):
         raise ValueError("incomplete shard index")
+    if index.get("schema_version") != 2:
+        raise ValueError("backbone training requires schema 2 cache with N/CA/C/O atoms")
     if not sum(shard["splits"].get("train", 0) for shard in index["shards"]):
         raise ValueError("cache has no training records")
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
@@ -241,10 +297,13 @@ def main():
         for batch in train_batches(args.cache, index, args.batch_size, args.seed,
                                    epoch, pin_memory=device.type == "cuda"):
             batch = {key: value.to(device, non_blocking=True).float()
-                     if key in ("embed", "ca", "rot") else
+                     if key in ("embed", "ca", "rot", "atoms") else
                      value.to(device, non_blocking=True)
                      for key, value in batch.items()}
-            loss, parts = batch_flow_loss(model, batch)
+            loss, parts = batch_flow_loss(model, batch,
+                                          atom_weight=args.atom_weight,
+                                          bond_weight=args.bond_weight,
+                                          angle_weight=args.angle_weight)
             (loss / args.accumulate).backward()
             pending += 1
             seen += len(batch["aa"])
@@ -276,6 +335,8 @@ def main():
                           config=model.config, epoch=epoch + 1, best_score=best_score,
                           seed=args.seed, ode_steps=args.ode_steps,
                           batch_size=args.batch_size, accumulate=args.accumulate,
+                          atom_weight=args.atom_weight, bond_weight=args.bond_weight,
+                          angle_weight=args.angle_weight,
                           index_sha256=sha256(index_path), manifest_sha256=index["manifest_sha256"],
                           python_rng=random.getstate(), torch_rng=torch.get_rng_state(),
                           cuda_rng=torch.cuda.get_rng_state_all() if device.type == "cuda" else None)

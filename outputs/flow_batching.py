@@ -16,12 +16,14 @@ def collate(records, pin_memory=False):
         aa=torch.zeros(batch, length, dtype=torch.long),
         ca=torch.zeros(batch, length, 3),
         rot=torch.eye(3).expand(batch, length, 3, 3).clone(),
+        atoms=torch.zeros(batch, length, 4, 3),
+        atom_mask=torch.zeros(batch, length, 4, dtype=torch.bool),
         segments=torch.full((batch, length), -1, dtype=torch.long),
         mask=torch.zeros(batch, length, dtype=torch.bool),
     )
     for i, record in enumerate(records):
         n = len(record["aa"])
-        for key in ("embed", "aa", "ca", "rot", "segments"):
+        for key in ("embed", "aa", "ca", "rot", "atoms", "atom_mask", "segments"):
             result[key][i, :n] = record[key]
         result["mask"][i, :n] = True
     if pin_memory:

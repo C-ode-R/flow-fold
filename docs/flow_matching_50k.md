@@ -50,32 +50,32 @@ rsync -a --partial --files-from=work/flow50k/upload_files.txt ./ USER@HOST:~/flo
 
 .venv/bin/python data/embed_flow_shards.py \
   --manifest work/flow50k/manifest.json \
-  --out work/flow50k/cache --device cuda \
+  --out work/flow50k/cache_backbone --device cuda \
   --model facebook/esm2_t6_8M_UR50D --batch-size 32 --shard-size 256
 
 cd outputs
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --cache ../work/flow50k/cache_backbone --out run_flow_50k_backbone \
   --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda
 
 ../.venv/bin/python evaluate_flow_large.py \
-  --cache ../work/flow50k/cache \
-  --checkpoint run_flow_50k_batched/best.pt \
-  --out run_flow_50k_batched/test.json --device cuda
+  --cache ../work/flow50k/cache_backbone \
+  --checkpoint run_flow_50k_backbone/best.pt \
+  --out run_flow_50k_backbone/test.json --device cuda
 ```
 
 `work/`와 checkpoints는 Git에서 제외된다. 후보 수집은 페이지 단위, 임베딩은 샤드 단위로 재시작할 수 있다. 학습은 **완료된 epoch 경계**에서만 재시작한다:
 
 ```bash
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --cache ../work/flow50k/cache_backbone --out run_flow_50k_backbone \
   --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda \
-  --resume run_flow_50k_batched/last.pt
+  --resume run_flow_50k_backbone/last.pt
 ```
 
 실제 확보 가능한 데이터 수가 5만 미만이면 `finalize_flow_manifest.py`는 요청한 수를 조용히 줄이지 않고 실패한다. 확보 수와 필터 탈락 사유를 보고한 뒤 목표를 다시 결정해야 한다. 임베딩 모델을 바꾸면 별도 캐시·실험으로 취급한다. 첫 구현은 작은 ESM-2 8M을 고정하며, 큰 PLM 효과와 Flow Matching 효과를 혼동하지 않기 위함이다.
 
-H100 학습 경로는 샤드별로 다음 샤드를 CPU에서 미리 읽고, 샤드 안의 서열을 길이별로 묶어 최대 8개씩 padding한다. 모든 attention, 삼각 갱신, 속도·거리·FAPE 손실에서 padding을 제외한다. CPU batch는 pinned memory를 사용해 비동기 전송하고, PyTorch scaled-dot-product attention과 BF16 autocast를 사용한다. `--batch-size 8 --accumulate 4`는 시작 설정이며 H100 메모리와 처리량을 보고 조정할 수 있다. 기존 단일 단백질 checkpoint와 새 batched 모델의 가중치는 호환되지 않아 실행 디렉터리를 `run_flow_50k_batched`로 분리했다.
+H100 학습 경로는 샤드별로 다음 샤드를 CPU에서 미리 읽고, 샤드 안의 서열을 길이별로 묶어 최대 8개씩 padding한다. 모든 attention, 삼각 갱신, 속도·거리·FAPE 손실에서 padding을 제외한다. CPU batch는 pinned memory를 사용해 비동기 전송하고, PyTorch scaled-dot-product attention과 BF16 autocast를 사용한다. `--batch-size 8 --accumulate 4`는 시작 설정이며 H100 메모리와 처리량을 보고 조정할 수 있다. 기존 단일 단백질 checkpoint와 새 batched 모델의 가중치는 호환되지 않아 실행 디렉터리를 `run_flow_50k_backbone`로 분리했다. 새 캐시의 schema version은 2이며 종전 캐시와 섞지 않는다. Backbone loss 가중치 기본값은 atom 0.1, bond 0.05, angle 0.05다.
 
 ## 알고리즘
 
@@ -84,7 +84,7 @@ H100 학습 경로는 샤드별로 다음 샤드를 CPU에서 미리 읽고, 샤
 1. **조건 입력:** 고정 ESM-2 residue 임베딩과 아미노산 ID를 single representation으로, 두 residue와 절대 서열 offset을 pair representation으로 만든다. 현재 noisy frame에서 계산한 국소 변위·상대 회전·거리를 pair에 주입하고 한 번의 삼각 pair 갱신을 한다. IPA 방식의 point-distance, pair bias, pair value를 통해 residue 상태를 갱신한다.
 2. **확률 경로:** 평균을 제거한 Gaussian 위치 `x₀`와 무작위 proper SO(3) 회전 `R₀`을 시작점으로 뽑는다. 정답 구조는 반사를 허용하지 않는 Kabsch 회전으로 시작점에 정렬한다. `t∼U(0.02,0.98)`에서 `xₜ=(1−t)x₀+t x₁`, `Rₜ=R₀ Exp(t Log(R₀ᵀR₁))`를 만든다.
 3. **목표 속도:** 위치 목표는 `Rₜᵀ(x₁−x₀)`인 residue local velocity, 회전 목표는 `Log(R₀ᵀR₁)`인 body-frame angular velocity다. 모델은 서열·`xₜ,Rₜ,t`를 받아 두 값을 예측한다.
-4. **손실:** 위치/회전 속도 MSE가 주목표다. symmetric distogram CE와 예측한 종료 frame의 Cα frame-aligned point error를 보조 손실로 준다. 학습 중에는 유효한 같은 chain segment의 pair만 구조 손실에 포함한다. 회전 적분은 SO(3) exponential map을 써서 determinant +1을 유지한다.
+4. **손실:** 위치/회전 속도 MSE가 주목표다. symmetric distogram CE와 예측한 종료 frame의 Cα frame-aligned point error를 보조 손실로 준다. 종료 frame에서 이상적인 결합 길이·각도로 N/CA/C/O를 복원하고 관측 원자 위치, peptide C–N 결합 길이, CA–C–N 각도 손실을 추가한다. O가 없거나 다음 잔기가 다른 segment면 해당 O는 제외한다. 이는 residue frame 기반의 backbone 복원이며 독립적인 all-atom 생성기는 아니다. 학습 중에는 유효한 같은 chain segment의 pair만 구조 손실에 포함한다. 회전 적분은 SO(3) exponential map을 써서 determinant +1을 유지한다.
 5. **추론:** 서열과 무작위 시작 frame에서 25단계 Euler ODE 적분으로 구조를 만든다. Validation은 매 epoch 고정 seed로 같은 방식으로 생성하며, `median RMSD/10 + 1−median lDDT`로 best checkpoint를 고른다. Test 데이터는 `evaluate_flow_large.py`에서 선택 후에만 읽는다.
 
 이것은 FoldFlow/AlphaFold 전체를 복제한 모델이 아니다. 특히 큰 PLM, 다층 삼각 trunk, 재활용, 강한 원자 수준 보정은 이후 ablation으로 추가한다. 먼저 이 작은 조건부 Flow가 5만 pseudo-label에서 학습 가능한지 확인한다.
@@ -93,9 +93,13 @@ H100 학습 경로는 샤드별로 다음 샤드를 CPU에서 미리 읽고, 샤
 
 - `work/afdb_short/candidates.json`: 후보, 품질 수치, 탈락 사유
 - `work/flow50k/manifest.json` 및 `audit.json`: 확정 분할과 중복 감사
-- `work/flow50k/cache/index.json` 및 `shard_*.pt`: 임베딩·frame 정답과 checksum
-- `outputs/run_flow_50k_batched/history.jsonl`, `last.pt`, `best.pt`, `best_validation.json`, `test.json`
+- `work/flow50k/cache_backbone/index.json` 및 `shard_*.pt`: 임베딩·frame·N/CA/C/O 정답과 checksum
+- `outputs/run_flow_50k_backbone/history.jsonl`, `last.pt`, `best.pt`, `best_validation.json`, `test.json`
 
-생성 손실이 내려가는 것만으로 성공으로 보지 않는다. 동일 데이터·평가 조건의 기존 Pair-Aware와 Cα RMSD, lDDT-Cα, TM 지표, 장거리 접촉을 비교한다. 현재 TM 지표는 고정 잔기 대응 근사치이므로 최종 평가에는 정식 TM-align 구현을 별도로 고정해야 한다. 새 untouched experimental test에서 모델을 선택하지 않는다.
+생성 손실이 내려가는 것만으로 성공으로 보지 않는다. 동일 데이터·평가 조건의 기존 Pair-Aware와 Cα RMSD, lDDT-Cα, TM 지표, 장거리 접촉을 비교한다. N/C/O 원자 MAE와 peptide 결합·각도 오차도 함께 기록한다. 현재 TM 지표는 고정 잔기 대응 근사치이므로 최종 평가에는 정식 TM-align 구현을 별도로 고정해야 한다. 새 untouched experimental test에서 모델을 선택하지 않는다.
 
 참고: [FoldFlow-2](https://arxiv.org/html/2405.20313), [AlphaFold 2](https://www.nature.com/articles/s41586-021-03819-2), [AlphaFold DB API](https://alphafold.ebi.ac.uk/api/prediction/Q92793), [UniProt REST](https://www.uniprot.org/help/api).
+
+## 대규모 학습 시작 조건
+
+2026-10-23 현재 **NO-GO**: strict pilot 47/1,000(4.7%)는 50만 조회에서 후보 7만을 채울 필요 비율 14%보다 낮다. 확정된 5만 학습 manifest와 schema 2 캐시, H100 GPU 실측 처리량도 없다. 먼저 데이터 소스/품질 기준을 조정해 7만 후보 및 누수 제외 후 5만 학습 구조를 확보하고, 작은 subset에서 backbone 원자 지표와 Cα 구조 지표가 동시에 나아지는지 확인한다. 이어 H100 1장으로 batch 크기·메모리·epoch 시간과 재시작을 검증한 뒤 전체 학습을 시작한다.

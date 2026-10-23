@@ -7,6 +7,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "outputs"))
 
+from backbone_atoms import reconstruct_backbone  # noqa: E402
 from flow_batching import collate, train_batches  # noqa: E402
 from flow_model_large import SequenceFrameFlow  # noqa: E402
 from train_flow_large import batch_flow_loss  # noqa: E402
@@ -14,10 +15,13 @@ from train_flow_large import batch_flow_loss  # noqa: E402
 
 def record(length, seed):
     generator = torch.Generator().manual_seed(seed)
+    ca = torch.randn(length, 3, generator=generator)
+    rot = torch.eye(3).expand(length, 3, 3).clone()
     return dict(embed=torch.randn(length, 16, generator=generator).half(),
                 aa=torch.randint(0, 20, (length,), generator=generator),
-                ca=torch.randn(length, 3, generator=generator),
-                rot=torch.eye(3).expand(length, 3, 3).clone(),
+                ca=ca, rot=rot,
+                atoms=reconstruct_backbone(ca, rot),
+                atom_mask=torch.ones(length, 4, dtype=torch.bool),
                 segments=torch.zeros(length, dtype=torch.long))
 
 

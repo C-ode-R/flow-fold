@@ -22,17 +22,17 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python -m unittest discover -s tests -v
 
 .venv/bin/python data/embed_flow_shards.py \
-  --manifest work/flow50k/manifest.json --out work/flow50k/cache \
+  --manifest work/flow50k/manifest.json --out work/flow50k/cache_backbone \
   --device cuda --batch-size 32 --shard-size 256
 
 cd outputs
 resume=()
-if [ -f run_flow_50k_batched/last.pt ]; then
-  resume=(--resume run_flow_50k_batched/last.pt)
+if [ -f run_flow_50k_backbone/last.pt ]; then
+  resume=(--resume run_flow_50k_backbone/last.pt)
 fi
 ../.venv/bin/python train_flow_large.py \
-  --cache ../work/flow50k/cache --out run_flow_50k_batched \
+  --cache ../work/flow50k/cache_backbone --out run_flow_50k_backbone \
   --epochs 10 --batch-size 8 --accumulate 4 --ode-steps 25 --device cuda "${resume[@]}"
 ../.venv/bin/python evaluate_flow_large.py \
-  --cache ../work/flow50k/cache --checkpoint run_flow_50k_batched/best.pt \
-  --out run_flow_50k_batched/test.json --device cuda
+  --cache ../work/flow50k/cache_backbone --checkpoint run_flow_50k_backbone/best.pt \
+  --out run_flow_50k_backbone/test.json --device cuda

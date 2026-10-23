@@ -29,8 +29,12 @@ def parse_structure(row, manifest_dir=None):
     sequence = "".join(seq1(residue.resname, custom_map={"UNK": "X"}) for residue in residues)
     if sequence != row["sequence"]:
         raise ValueError(f"structure/manifest sequence mismatch: {row['id']}:{row['chain']}")
-    atoms = torch.tensor([[[float(x) for x in residue[name].coord]
-                           for name in ("N", "CA", "C")] for residue in residues])
+    atom_names = ("N", "CA", "C", "O")
+    atom_mask = torch.tensor([[name in residue for name in atom_names]
+                              for residue in residues], dtype=torch.bool)
+    atoms = torch.tensor([[[float(x) for x in
+                            (residue[name].coord if name in residue else residue["CA"].coord)]
+                           for name in atom_names] for residue in residues])
     ca = atoms[:, 1]
     e1 = torch.nn.functional.normalize(atoms[:, 2] - ca, dim=-1)
     v2 = atoms[:, 0] - ca
@@ -46,7 +50,7 @@ def parse_structure(row, manifest_dir=None):
         breaks.append(right.id[1] != left.id[1] + 1 or cn > 2.2)
     segments = torch.tensor(breaks, dtype=torch.long).cumsum(0)
     return dict(aa=torch.tensor([ALPHABET.index(letter) for letter in sequence]),
-                ca=ca, rot=rotation, atoms=atoms, segments=segments)
+                ca=ca, rot=rotation, atoms=atoms, atom_mask=atom_mask, segments=segments)
 
 
 def main():
@@ -67,11 +71,12 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     index_path = args.out / "index.json"
     index = json.loads(index_path.read_text()) if index_path.exists() else {
-        "manifest_sha256": manifest_sha, "model": args.model,
+        "schema_version": 2, "manifest_sha256": manifest_sha, "model": args.model,
         "shard_size": args.shard_size, "count": 0, "shards": []}
-    if (index["manifest_sha256"] != manifest_sha or index["model"] != args.model or
+    if (index.get("schema_version") != 2 or index["manifest_sha256"] != manifest_sha or
+            index["model"] != args.model or
             index["shard_size"] != args.shard_size):
-        raise ValueError("Output directory contains a different manifest/model/shard size")
+        raise ValueError("Output directory contains a different cache schema/manifest/model/shard size")
     if any(not (args.out / shard["file"]).is_file() for shard in index["shards"]):
         raise ValueError("index references a missing shard")
     if any(fingerprint(args.out / shard["file"]) != shard["sha256"]
