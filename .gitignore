@@ -11,3 +11,16 @@ outputs/*.cif
 outputs/multi_data/
 outputs/manifest_*.json
 outputs/run_*/
+.env
+data/raw/
+data/catalog/
+outputs/
+data/mps_pilot/
+.venv-*/
+data/dataset_v1_final/
+data/cache*/
+data/pipeline_smoke*/
+data/gpu_ready/
+# Generated local artifacts
+dist/
+data/gpu_ready_smoke/
